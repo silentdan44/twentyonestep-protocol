@@ -8,6 +8,7 @@ This implementation is based on the methodology described in:
 ## Installation
 ```bash
 git clone https://github.com/silentdan44/twentyonestep-protocol.git
+cd twentyonestep-protocol
 pip install -e .
 ```
 ### Requirements
