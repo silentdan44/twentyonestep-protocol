@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twentyonestep-protocol"
+version = "0.1.0"
+description = "21-stage pressure ramping MD protocol for OpenMM (Larsen et al., 2011)."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Danis Bekmanusrov", email = "riodan44a@gmail.com"},
+]
+keywords = ["openmm", "molecular dynamics", "equilibration", "polymer"]
+requires-python = ">=3.9"
+
+dependencies = [
+    "openmm >= 8.0.0",
+    "numpy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["twentyonestep"]
