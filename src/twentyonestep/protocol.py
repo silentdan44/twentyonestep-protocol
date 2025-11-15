@@ -156,7 +156,7 @@ class TwentyOneStepProtocol:
 
         self.simulation = simulation
         self.schedule: list[dict] = []
-        self._generate_schedule(max_pressure)
+        self._generate_schedule(max_pressure, max_temperature)
 
     def _generate_schedule(
         self, max_pressure: Quantity, max_temperature: Quantity = 600 * unit.kelvin
