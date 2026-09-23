@@ -66,8 +66,13 @@ class MDStep:
         """
         Executes the molecular dynamics stage.
 
-        This method sets the new temperature, initializes velocities,
-        configures the barostat (if pressure is not None), and runs the steps.
+        This method sets the new target temperature, configures the barostat
+        (if pressure is not None), and runs the steps.
+
+        Velocities are intentionally not reinitialized between stages. The
+        protocol uses abrupt changes of the thermostat target temperature, but
+        re-sampling velocities at every stage would discard the dynamical
+        history of the preceding stage.
 
         Args:
             frequency: The frequency (in steps) for the Monte Carlo Barostat moves.
@@ -79,7 +84,6 @@ class MDStep:
         print(f"Time: {self.time}")
 
         self.simulation.integrator.setTemperature(self.temperature)
-        self.simulation.context.setVelocitiesToTemperature(self.temperature)
         self._set_barostat(frequency)
         self.simulation.context.reinitialize(preserveState=True)
         self.simulation.step(self.steps)
@@ -125,6 +129,8 @@ class TwentyOneStepProtocol:
         simulation: Simulation,
         max_pressure: Quantity = 50_000 * unit.bar,
         max_temperature: Quantity = 600 * unit.kelvin,
+        target_temperature: Quantity = 300 * unit.kelvin,
+        target_pressure: Quantity = 1 * unit.bar,
     ):
         """
         Initializes the protocol manager and generates the schedule.
@@ -134,6 +140,8 @@ class TwentyOneStepProtocol:
             max_pressure: The maximum pressure to be used in the ramping stages
                 (md9). Defaults to 50,000 bar.
             max_temperature: The maximum temperature for the equilibration. Defaults to 600 K.
+            target_temperature: The cooling and final equilibration temperature. Defaults to 300 K.
+            target_pressure: The final pressure at md21. Defaults to 1 bar.
 
         Raises:
             TypeError: If argument types are incorrect.
@@ -154,12 +162,28 @@ class TwentyOneStepProtocol:
                 "Argument 'max_temperature' should be an instance of openmm.unit.Quantity"
             )
 
+        if not isinstance(target_temperature, Quantity):
+            raise TypeError(
+                "Argument 'target_temperature' should be an instance of openmm.unit.Quantity"
+            )
+
+        if not isinstance(target_pressure, Quantity):
+            raise TypeError(
+                "Argument 'target_pressure' should be an instance of openmm.unit.Quantity"
+            )
+
         self.simulation = simulation
         self.schedule: list[dict] = []
-        self._generate_schedule(max_pressure, max_temperature)
+        self._generate_schedule(
+            max_pressure, max_temperature, target_temperature, target_pressure
+        )
 
     def _generate_schedule(
-        self, max_pressure: Quantity, max_temperature: Quantity = 600 * unit.kelvin
+        self,
+        max_pressure: Quantity,
+        max_temperature: Quantity = 600 * unit.kelvin,
+        target_temperature: Quantity = 300 * unit.kelvin,
+        target_pressure: Quantity = 1 * unit.bar,
     ):
         """
         Generates the 21-stage pressure ramping schedule based on a
@@ -168,6 +192,8 @@ class TwentyOneStepProtocol:
         Args:
             max_pressure: The peak pressure value used to scale other pressure steps.
             max_temperature: The maximum temperature for the equilibration. Defaults to 600 K.
+            target_temperature: The cooling and final equilibration temperature. Defaults to 300 K.
+            target_pressure: The final pressure. Defaults to 1 bar.
         """
 
         self.schedule = [
@@ -178,13 +204,13 @@ class TwentyOneStepProtocol:
                 "name": "md1",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 50 * unit.picosecond,
                 "name": "md2",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure * 0.02,
                 "time": 50 * unit.picosecond,
                 "name": "md3",
@@ -196,13 +222,13 @@ class TwentyOneStepProtocol:
                 "name": "md4",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 100 * unit.picosecond,
                 "name": "md5",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure * 0.6,
                 "time": 50 * unit.picosecond,
                 "name": "md6",
@@ -214,13 +240,13 @@ class TwentyOneStepProtocol:
                 "name": "md7",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 100 * unit.picosecond,
                 "name": "md8",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure,
                 "time": 50 * unit.picosecond,
                 "name": "md9",
@@ -232,13 +258,13 @@ class TwentyOneStepProtocol:
                 "name": "md10",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 100 * unit.picosecond,
                 "name": "md11",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure * 0.5,
                 "time": 5 * unit.picosecond,
                 "name": "md12",
@@ -250,13 +276,13 @@ class TwentyOneStepProtocol:
                 "name": "md13",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 10 * unit.picosecond,
                 "name": "md14",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure * 0.1,
                 "time": 5 * unit.picosecond,
                 "name": "md15",
@@ -268,13 +294,13 @@ class TwentyOneStepProtocol:
                 "name": "md16",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 10 * unit.picosecond,
                 "name": "md17",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": max_pressure * 0.01,
                 "time": 5 * unit.picosecond,
                 "name": "md18",
@@ -286,14 +312,14 @@ class TwentyOneStepProtocol:
                 "name": "md19",
             },
             {
-                "temperature": 300 * unit.kelvin,
+                "temperature": target_temperature,
                 "pressure": None,
                 "time": 10 * unit.picosecond,
                 "name": "md20",
             },
             {
-                "temperature": 300 * unit.kelvin,
-                "pressure": 1 * unit.bar,
+                "temperature": target_temperature,
+                "pressure": target_pressure,
                 "time": 800 * unit.picosecond,
                 "name": "md21",
             },
