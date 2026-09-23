@@ -45,6 +45,7 @@ class MDStep:
         time: Quantity,
         name: str,
         output_dir: Path | None = None,
+        reporter_registry: list | None = None,
     ):
         """
         Initializes an MD step configuration.
@@ -88,6 +89,7 @@ class MDStep:
         self.time = time
         self.name = name
         self.output_dir = output_dir
+        self.reporter_registry = reporter_registry
 
         timestep = simulation.integrator.getStepSize()
         self.steps = int(round(time / timestep))
@@ -131,14 +133,19 @@ class MDStep:
                 separator=",",
             )
             self.simulation.reporters.append(reporter)
+            if self.reporter_registry is not None:
+                self.reporter_registry.append(reporter)
 
         try:
             self.simulation.step(self.steps)
             if self.output_dir is not None:
                 self.simulation.saveCheckpoint(str(self.output_dir / f"{self.name}.chk"))
         finally:
-            if reporter is not None:
+            if reporter is not None and reporter in self.simulation.reporters:
                 self.simulation.reporters.remove(reporter)
+            if reporter is not None and self.reporter_registry is not None:
+                if reporter in self.reporter_registry:
+                    self.reporter_registry.remove(reporter)
 
         print(f"Completed stage {self.name}")
 
@@ -274,6 +281,7 @@ class TwentyOneStepProtocol:
 
         self.simulation = simulation
         self.output_dir = output_dir
+        self._protocol_reporters: list = []
         self.schedule: list[Stage] = []
         self._generate_schedule(
             max_pressure, max_temperature, target_temperature, target_pressure
@@ -454,15 +462,27 @@ class TwentyOneStepProtocol:
 
         print(f"\n--- Protocol Starting: {len(self.schedule)} Stages ---")
 
-        for task in self.schedule:
-            step = MDStep(
-                simulation=self.simulation,
-                temperature=task.temperature,
-                pressure=task.pressure,
-                time=task.time,
-                name=task.name,
-                output_dir=self.output_dir,
-            )
-            step.run(frequency=barostat_frequency)
+        try:
+            for task in self.schedule:
+                step = MDStep(
+                    simulation=self.simulation,
+                    temperature=task.temperature,
+                    pressure=task.pressure,
+                    time=task.time,
+                    name=task.name,
+                    output_dir=self.output_dir,
+                    reporter_registry=self._protocol_reporters,
+                )
+                step.run(frequency=barostat_frequency)
+        finally:
+            self._cleanup_reporters()
 
         print("\n--- Protocol Completed Successfully ---")
+
+    def _cleanup_reporters(self):
+        """Remove every reporter created by this protocol instance."""
+
+        for reporter in list(self._protocol_reporters):
+            if reporter in self.simulation.reporters:
+                self.simulation.reporters.remove(reporter)
+        self._protocol_reporters.clear()
