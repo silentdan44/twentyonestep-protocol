@@ -1,6 +1,31 @@
-from openmm import MonteCarloBarostat, unit
-from openmm.app import Simulation
+from dataclasses import dataclass
+from pathlib import Path
+
+from openmm import (
+    MonteCarloAnisotropicBarostat,
+    MonteCarloBarostat,
+    MonteCarloMembraneBarostat,
+    unit,
+)
+from openmm.app import Simulation, StateDataReporter
 from openmm.unit import Quantity
+
+
+@dataclass(frozen=True)
+class Stage:
+    """Thermodynamic conditions and duration of one protocol stage."""
+
+    temperature: Quantity
+    pressure: Quantity | None
+    time: Quantity
+    name: str
+
+
+BAROSTAT_TYPES = (
+    MonteCarloBarostat,
+    MonteCarloAnisotropicBarostat,
+    MonteCarloMembraneBarostat,
+)
 
 
 class MDStep:
@@ -19,6 +44,7 @@ class MDStep:
         pressure: Quantity,
         time: Quantity,
         name: str,
+        output_dir: Path | None = None,
     ):
         """
         Initializes an MD step configuration.
@@ -53,11 +79,15 @@ class MDStep:
         if not isinstance(name, str):
             raise TypeError("Argument 'name' should be an instance of str")
 
+        if output_dir is not None and not isinstance(output_dir, Path):
+            raise TypeError("Argument 'output_dir' should be a pathlib.Path or None")
+
         self.simulation = simulation
         self.temperature = temperature
         self.pressure = pressure
         self.time = time
         self.name = name
+        self.output_dir = output_dir
 
         timestep = simulation.integrator.getStepSize()
         self.steps = int(round(time / timestep))
@@ -86,7 +116,29 @@ class MDStep:
         self.simulation.integrator.setTemperature(self.temperature)
         self._set_barostat(frequency)
         self.simulation.context.reinitialize(preserveState=True)
-        self.simulation.step(self.steps)
+        reporter = None
+        if self.output_dir is not None:
+            reporter = StateDataReporter(
+                str(self.output_dir / f"{self.name}.csv"),
+                max(1, min(frequency, self.steps)),
+                step=True,
+                time=True,
+                potentialEnergy=True,
+                kineticEnergy=True,
+                temperature=True,
+                volume=True,
+                density=True,
+                separator=",",
+            )
+            self.simulation.reporters.append(reporter)
+
+        try:
+            self.simulation.step(self.steps)
+            if self.output_dir is not None:
+                self.simulation.saveCheckpoint(str(self.output_dir / f"{self.name}.chk"))
+        finally:
+            if reporter is not None:
+                self.simulation.reporters.remove(reporter)
 
         print(f"Completed stage {self.name}")
 
@@ -101,13 +153,36 @@ class MDStep:
 
         system = self.simulation.system
 
-        for i, force in enumerate(list(system.getForces())):
-            if isinstance(force, MonteCarloBarostat):
-                system.removeForce(i)
+        barostat_indices = [
+            i
+            for i in range(system.getNumForces())
+            if isinstance(system.getForce(i), BAROSTAT_TYPES)
+        ]
+        for i in reversed(barostat_indices):
+            system.removeForce(i)
+
+        remaining = [
+            force
+            for force in system.getForces()
+            if isinstance(force, BAROSTAT_TYPES)
+        ]
+        if remaining:
+            raise RuntimeError("Failed to remove all existing Monte Carlo barostats")
 
         if self.pressure is not None:
             system.addForce(
                 MonteCarloBarostat(self.pressure, self.temperature, frequency)
+            )
+
+        added = [
+            force
+            for force in system.getForces()
+            if isinstance(force, BAROSTAT_TYPES)
+        ]
+        expected = 1 if self.pressure is not None else 0
+        if len(added) != expected:
+            raise RuntimeError(
+                f"Expected {expected} Monte Carlo barostat(s), found {len(added)}"
             )
 
 
@@ -131,6 +206,7 @@ class TwentyOneStepProtocol:
         max_temperature: Quantity = 600 * unit.kelvin,
         target_temperature: Quantity = 300 * unit.kelvin,
         target_pressure: Quantity = 1 * unit.bar,
+        output_dir: str | Path | None = None,
     ):
         """
         Initializes the protocol manager and generates the schedule.
@@ -142,6 +218,7 @@ class TwentyOneStepProtocol:
             max_temperature: The maximum temperature for the equilibration. Defaults to 600 K.
             target_temperature: The cooling and final equilibration temperature. Defaults to 300 K.
             target_pressure: The final pressure at md21. Defaults to 1 bar.
+            output_dir: Directory for per-stage CSV diagnostics and checkpoints.
 
         Raises:
             TypeError: If argument types are incorrect.
@@ -172,8 +249,32 @@ class TwentyOneStepProtocol:
                 "Argument 'target_pressure' should be an instance of openmm.unit.Quantity"
             )
 
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        for name, value in (
+            ("max_pressure", max_pressure),
+            ("max_temperature", max_temperature),
+            ("target_temperature", target_temperature),
+            ("target_pressure", target_pressure),
+        ):
+            if value <= 0 * value.unit:
+                raise ValueError(f"Argument '{name}' must be positive")
+
+        if not hasattr(simulation.integrator, "setTemperature"):
+            raise TypeError(
+                "The simulation integrator must support setTemperature()"
+            )
+
+        if not simulation.system.usesPeriodicBoundaryConditions():
+            raise ValueError(
+                "The system must use periodic boundary conditions for this protocol"
+            )
+
         self.simulation = simulation
-        self.schedule: list[dict] = []
+        self.output_dir = output_dir
+        self.schedule: list[Stage] = []
         self._generate_schedule(
             max_pressure, max_temperature, target_temperature, target_pressure
         )
@@ -197,132 +298,132 @@ class TwentyOneStepProtocol:
         """
 
         self.schedule = [
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 50 * unit.picosecond,
-                "name": "md1",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 50 * unit.picosecond,
-                "name": "md2",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure * 0.02,
-                "time": 50 * unit.picosecond,
-                "name": "md3",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 50 * unit.picosecond,
-                "name": "md4",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 100 * unit.picosecond,
-                "name": "md5",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure * 0.6,
-                "time": 50 * unit.picosecond,
-                "name": "md6",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 50 * unit.picosecond,
-                "name": "md7",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 100 * unit.picosecond,
-                "name": "md8",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure,
-                "time": 50 * unit.picosecond,
-                "name": "md9",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 50 * unit.picosecond,
-                "name": "md10",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 100 * unit.picosecond,
-                "name": "md11",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure * 0.5,
-                "time": 5 * unit.picosecond,
-                "name": "md12",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 5 * unit.picosecond,
-                "name": "md13",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 10 * unit.picosecond,
-                "name": "md14",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure * 0.1,
-                "time": 5 * unit.picosecond,
-                "name": "md15",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 5 * unit.picosecond,
-                "name": "md16",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 10 * unit.picosecond,
-                "name": "md17",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": max_pressure * 0.01,
-                "time": 5 * unit.picosecond,
-                "name": "md18",
-            },
-            {
-                "temperature": max_temperature,
-                "pressure": None,
-                "time": 5 * unit.picosecond,
-                "name": "md19",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": None,
-                "time": 10 * unit.picosecond,
-                "name": "md20",
-            },
-            {
-                "temperature": target_temperature,
-                "pressure": target_pressure,
-                "time": 800 * unit.picosecond,
-                "name": "md21",
-            },
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 50 * unit.picosecond,
+                name= "md1",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 50 * unit.picosecond,
+                name= "md2",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure * 0.02,
+                time= 50 * unit.picosecond,
+                name= "md3",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 50 * unit.picosecond,
+                name= "md4",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 100 * unit.picosecond,
+                name= "md5",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure * 0.6,
+                time= 50 * unit.picosecond,
+                name= "md6",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 50 * unit.picosecond,
+                name= "md7",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 100 * unit.picosecond,
+                name= "md8",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure,
+                time= 50 * unit.picosecond,
+                name= "md9",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 50 * unit.picosecond,
+                name= "md10",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 100 * unit.picosecond,
+                name= "md11",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure * 0.5,
+                time= 5 * unit.picosecond,
+                name= "md12",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 5 * unit.picosecond,
+                name= "md13",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 10 * unit.picosecond,
+                name= "md14",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure * 0.1,
+                time= 5 * unit.picosecond,
+                name= "md15",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 5 * unit.picosecond,
+                name= "md16",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 10 * unit.picosecond,
+                name= "md17",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= max_pressure * 0.01,
+                time= 5 * unit.picosecond,
+                name= "md18",
+            ),
+            Stage(
+                temperature= max_temperature,
+                pressure= None,
+                time= 5 * unit.picosecond,
+                name= "md19",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= None,
+                time= 10 * unit.picosecond,
+                name= "md20",
+            ),
+            Stage(
+                temperature= target_temperature,
+                pressure= target_pressure,
+                time= 800 * unit.picosecond,
+                name= "md21",
+            ),
         ]
 
     def run(self, barostat_frequency: int = 500):
@@ -343,6 +444,8 @@ class TwentyOneStepProtocol:
             raise TypeError(
                 "Argument 'barostat_frequency' should be an instance of int"
             )
+        if barostat_frequency <= 0:
+            raise ValueError("Argument 'barostat_frequency' must be positive")
 
         if not self.schedule:
             raise RuntimeError(
@@ -352,7 +455,14 @@ class TwentyOneStepProtocol:
         print(f"\n--- Protocol Starting: {len(self.schedule)} Stages ---")
 
         for task in self.schedule:
-            step = MDStep(simulation=self.simulation, **task)
+            step = MDStep(
+                simulation=self.simulation,
+                temperature=task.temperature,
+                pressure=task.pressure,
+                time=task.time,
+                name=task.name,
+                output_dir=self.output_dir,
+            )
             step.run(frequency=barostat_frequency)
 
         print("\n--- Protocol Completed Successfully ---")
