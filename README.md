@@ -9,8 +9,25 @@ This implementation is based on the methodology described in:
 ```bash
 git clone https://github.com/silentdan44/twentyonestep-protocol.git
 cd twentyonestep-protocol
+uv sync
+```
+
+The project uses [uv](https://docs.astral.sh/uv/) for environment and dependency
+management. This creates the project environment and installs the package in
+editable mode from `uv.lock`.
+
+To run a script with the project environment:
+
+```bash
+uv run python path/to/script.py
+```
+
+Alternatively, an existing virtual environment can still be used with:
+
+```bash
 pip install -e .
 ```
+
 ### Requirements
 ```
 openmm >= 8.0
